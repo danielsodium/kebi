@@ -1,4 +1,3 @@
-use crate::models::Message;
 use async_openai::{
     Client,
     config::OpenAIConfig,
@@ -15,6 +14,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ToolArg {
     pub name: String,
     pub description: String,
@@ -22,6 +22,7 @@ pub struct ToolArg {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ToolFunction {
     pub name: String,
     pub desc: String,
@@ -57,7 +58,7 @@ struct StreamDelta {
 
 pub struct ToolCall {
     name: String,
-    args: HashMap<String, Message>,
+    args: HashMap<String, String>,
 }
 
 pub enum Response {
@@ -224,14 +225,14 @@ impl LlmClient {
             let parsed: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&raw_args).unwrap_or_default();
 
-            let args: HashMap<String, Message> = parsed
+            let args: HashMap<String, String> = parsed
                 .into_iter()
                 .map(|(key, value)| {
                     let value = match value {
                         serde_json::Value::String(s) => s,
                         other => other.to_string(),
                     };
-                    (key, Message::unclass(value))
+                    (key, value)
                 })
                 .collect();
 

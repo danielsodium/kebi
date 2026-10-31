@@ -1,66 +1,78 @@
-pub struct Message {
-    pub data: Vec<Data<String>>,
+use super::llm_models::{LlmClient, Request, Response, ToolArg, ToolCall, ToolFunction};
+use std::io::{IsTerminal, Write, stdout};
+
+pub struct Chat {
+    model: String,
+    system: Vec<String>,
+    tools: Vec<ToolFunction>,
+    client: LlmClient,
 }
 
-pub struct Data<T> {
-    pub class: Classification,
-    data: T,
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Classification {
-    Unclass = 0,
-    Controlled = 1,
-    Secret = 2,
-    Password = 3,
-}
-
-impl<T: Clone> Data<T> {
-    pub fn new(data: T) -> Self {
-        Data {
-            class: Classification::Unclass,
-            data: data,
+impl Chat {
+    pub fn new(url: String, model: String) -> Self {
+        Chat {
+            model,
+            system: vec!["Answer directly and concisely without internal monologue, planning steps, or a chain-of-thought process.".to_string()],
+            tools: vec![ToolFunction {
+                name: "GET request".to_string(),
+                desc: "Send a GET request to a URL".to_string(),
+                args: vec![ToolArg {
+                    name: "URL".to_string(),
+                    description: "URL to send a GET Request to".to_string(),
+                    options: None,
+                }],
+                exec: "".to_string(),
+            }],
+            client: LlmClient::new(url)
         }
     }
 
-    pub fn get(&self) -> Option<&T> {
-        match self.class {
-            Classification::Unclass => Some(&self.data),
-            Classification::Controlled => Some(&self.data),
-            Classification::Secret => None,
-            Classification::Password => None,
+    fn request(&self, prompt: String) -> Request {
+        Request {
+            model: self.model.clone(),
+            system: self.system.concat(),
+            user: prompt,
+            history: vec![],
+            tools: self.tools.clone(),
         }
     }
 
-    pub fn dta(&self, target: Classification) -> Option<Data<T>> {
-        // low to high
-        if self.class < target {
-            return Some(Data {
-                class: target,
-                data: self.data.clone(),
-            });
-        }
-        return None;
+    pub async fn start(&self, prompt: String) {
+        let color = std::io::stdout().is_terminal();
+
+        let mut reasoning_deltas: Vec<String> = Vec::new();
+        let mut answer_deltas: Vec<String> = Vec::new();
+        let mut tool_call: Option<ToolCall> = None;
+
+        self.client
+            .stream(self.request(prompt), |event| match event {
+                Response::ReasoningDelta { delta } => {
+                    reasoning_deltas.push(delta);
+                    print_delta(color, &reasoning_deltas)
+                }
+                Response::AnswerDelta { delta } => {
+                    answer_deltas.push(delta);
+                    print_delta(false, &answer_deltas);
+                }
+                Response::ToolCall { tool } => tool_call = Some(tool),
+            })
+            .await
+            .unwrap();
+
+        let reasoning = reasoning_deltas.concat();
+        let answer = answer_deltas.concat();
+        let tool_call = tool_call;
+
+        if tool_call.is_some() {}
     }
 }
 
-impl Message {
-    pub fn new(data: Data<String>) -> Self {
-        Message { data: vec![data] }
+fn print_delta(color: bool, deltas: &Vec<String>) {
+    let delta = &deltas[deltas.len() - 1];
+    if color {
+        let _ = print!("\x1b[2m{delta}\x1b[0m");
+    } else {
+        let _ = print!("{delta}");
     }
-    pub fn unclass(string: String) -> Self {
-        Message::new(Data {
-            class: Classification::Unclass,
-            data: string,
-        })
-    }
-    pub fn string(&self) -> String {
-        let placeholder = "***".to_string();
-        return self
-            .data
-            .iter()
-            .map(|s| s.get().map(|s| s.as_str()).unwrap_or(&placeholder))
-            .collect::<Vec<_>>()
-            .join(" ");
-    }
+    stdout().flush().unwrap()
 }
