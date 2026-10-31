@@ -77,9 +77,9 @@ impl Chat {
             .unwrap();
 
         self.history.push(bot_response);
-        if tool_calls.len() > 0 {
-            println!("Ran {}", &tool_calls[0].name);
-            self.push_tool_result(&tool_calls[0].id, "404 error".to_string());
+        if !tool_calls.is_empty() {
+            println!("Ran {}", &tool_calls.first().unwrap().name);
+            self.push_tool_result(&tool_calls.first().unwrap().id, "404 error".to_string());
             self.run().await
         } else {
             println!()

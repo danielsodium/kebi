@@ -80,6 +80,13 @@ struct StreamDelta {
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
 }
 
+#[derive(Default)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -153,10 +160,8 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(url: String) -> Self {
-        let mut config = OpenAIConfig::new();
-        config = config.with_api_base(url);
         Self {
-            client: Client::with_config(config),
+            client: Client::with_config(OpenAIConfig::new().with_api_base(url)),
         }
     }
 
@@ -175,7 +180,7 @@ impl LlmClient {
             .await?;
 
         let mut content = String::new();
-        let mut tool_calls: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
+        let mut tool_calls: BTreeMap<u32, PendingToolCall> = BTreeMap::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -201,14 +206,14 @@ impl LlmClient {
                         let entry = tool_calls.entry(call.index).or_default();
 
                         if let Some(id) = call.id {
-                            entry.0 = id;
+                            entry.id = id;
                         }
                         if let Some(function) = call.function {
                             if let Some(name) = function.name {
-                                entry.1 = name;
+                                entry.name = name;
                             }
                             if let Some(arguments) = function.arguments {
-                                entry.2.push_str(&arguments);
+                                entry.arguments.push_str(&arguments);
                             }
                         }
                     }
@@ -218,7 +223,13 @@ impl LlmClient {
 
         let mut assistant_tool_calls = Vec::new();
 
-        for (_, (id, name, raw_args)) in tool_calls {
+        for (_, pending) in tool_calls {
+            let PendingToolCall {
+                id,
+                name,
+                arguments: raw_args,
+            } = pending;
+
             let parsed: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&raw_args).unwrap_or_default();
 
