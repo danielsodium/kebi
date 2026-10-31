@@ -78,8 +78,8 @@ impl Chat {
 
         self.history.push(bot_response);
         if tool_calls.len() > 0 {
-            println!("RECUSRING");
-            self.push_tool_result(&tool_calls[0].name, "404 error".to_string());
+            println!("Ran {}", &tool_calls[0].name);
+            self.push_tool_result(&tool_calls[0].id, "404 error".to_string());
             self.run().await
         } else {
             println!()

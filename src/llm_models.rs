@@ -155,7 +155,6 @@ impl LlmClient {
     pub fn new(url: String) -> Self {
         let mut config = OpenAIConfig::new();
         config = config.with_api_base(url);
-        config = config.with_api_key("sk-strata-hQwQlvpF5xeXCJG8mUQ0J094sHlUSEp0");
         Self {
             client: Client::with_config(config),
         }
