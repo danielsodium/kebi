@@ -2,11 +2,14 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionMessageToolCallChunk, ChatCompletionRequestAssistantMessage,
+        ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
+        ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
         ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+        ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, FunctionObject,
+        ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, FunctionCall,
+        FunctionObject,
     },
 };
 use futures::StreamExt;
@@ -30,11 +33,32 @@ pub struct ToolFunction {
     pub exec: String,
 }
 
+pub type Message = ChatCompletionRequestMessage;
+
+pub fn system_message(content: String) -> Message {
+    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+        content: ChatCompletionRequestSystemMessageContent::Text(content),
+        name: None,
+    })
+}
+
+pub fn user_message(content: String) -> Message {
+    ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+        content: ChatCompletionRequestUserMessageContent::Text(content),
+        name: None,
+    })
+}
+
+pub fn tool_message(tool_call_id: String, content: String) -> Message {
+    ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+        content: ChatCompletionRequestToolMessageContent::Text(content),
+        tool_call_id,
+    })
+}
+
 pub struct Request {
     pub model: String,
-    pub system: String,
-    pub user: String,
-    pub history: Vec<String>,
+    pub messages: Vec<Message>,
     pub tools: Vec<ToolFunction>,
 }
 
@@ -57,8 +81,10 @@ struct StreamDelta {
 }
 
 pub struct ToolCall {
-    name: String,
-    args: HashMap<String, String>,
+    pub id: String,
+    pub name: String,
+    pub args: HashMap<String, String>,
+    pub raw_arguments: String,
 }
 
 pub enum Response {
@@ -105,41 +131,9 @@ fn to_chat_tool(tool: ToolFunction) -> ChatCompletionTools {
 
 impl Request {
     pub fn into_chat_request(self) -> CreateChatCompletionRequest {
-        let mut messages = Vec::with_capacity(self.history.len() + 2);
-
-        if !self.system.is_empty() {
-            messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(self.system),
-                    name: None,
-                },
-            ));
-        }
-
-        for (i, entry) in self.history.into_iter().enumerate() {
-            messages.push(if i % 2 == 0 {
-                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: ChatCompletionRequestUserMessageContent::Text(entry),
-                    name: None,
-                })
-            } else {
-                ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(entry)),
-                    ..Default::default()
-                })
-            });
-        }
-
-        messages.push(ChatCompletionRequestMessage::User(
-            ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(self.user),
-                name: None,
-            },
-        ));
-
         CreateChatCompletionRequest {
             model: self.model,
-            messages,
+            messages: self.messages,
             tools: if self.tools.is_empty() {
                 None
             } else {
@@ -171,7 +165,7 @@ impl LlmClient {
         &self,
         request: Request,
         mut on_event: F,
-    ) -> Result<(), async_openai::error::OpenAIError>
+    ) -> Result<Message, async_openai::error::OpenAIError>
     where
         F: FnMut(Response),
     {
@@ -181,6 +175,7 @@ impl LlmClient {
             .create_stream_byot::<_, StreamChunk>(request.into_chat_request())
             .await?;
 
+        let mut content = String::new();
         let mut tool_calls: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
 
         while let Some(chunk) = stream.next().await {
@@ -188,7 +183,7 @@ impl LlmClient {
 
             for choice in chunk.choices {
                 let StreamDelta {
-                    content,
+                    content: content_delta,
                     reasoning_content,
                     tool_calls: calls,
                 } = choice.delta;
@@ -197,7 +192,8 @@ impl LlmClient {
                     on_event(Response::ReasoningDelta { delta });
                 }
 
-                if let Some(delta) = content {
+                if let Some(delta) = content_delta {
+                    content.push_str(&delta);
                     on_event(Response::AnswerDelta { delta });
                 }
 
@@ -221,7 +217,9 @@ impl LlmClient {
             }
         }
 
-        for (_, (_, name, raw_args)) in tool_calls {
+        let mut assistant_tool_calls = Vec::new();
+
+        for (_, (id, name, raw_args)) in tool_calls {
             let parsed: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&raw_args).unwrap_or_default();
 
@@ -236,11 +234,40 @@ impl LlmClient {
                 })
                 .collect();
 
+            assistant_tool_calls.push(ChatCompletionMessageToolCalls::Function(
+                ChatCompletionMessageToolCall {
+                    id: id.clone(),
+                    function: FunctionCall {
+                        name: name.clone(),
+                        arguments: raw_args.clone(),
+                    },
+                },
+            ));
+
             on_event(Response::ToolCall {
-                tool: ToolCall { name, args },
+                tool: ToolCall {
+                    id,
+                    name,
+                    args,
+                    raw_arguments: raw_args,
+                },
             });
         }
 
-        Ok(())
+        Ok(ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessage {
+                content: if content.is_empty() {
+                    None
+                } else {
+                    Some(ChatCompletionRequestAssistantMessageContent::Text(content))
+                },
+                tool_calls: if assistant_tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(assistant_tool_calls)
+                },
+                ..Default::default()
+            },
+        ))
     }
 }

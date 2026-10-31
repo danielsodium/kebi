@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 async-openai = { version = "0.42.3", features = ["chat-completion", "byot"] }
+async-recursion = "1.2.0"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,10 +1,14 @@
-use super::llm_models::{LlmClient, Request, Response, ToolArg, ToolCall, ToolFunction};
+use super::llm_models::{
+    LlmClient, Message, Request, Response, ToolArg, ToolCall, ToolFunction, system_message,
+    tool_message, user_message,
+};
+use async_recursion::async_recursion;
 use std::io::{IsTerminal, Write, stdout};
 
 pub struct Chat {
     model: String,
-    system: Vec<String>,
     tools: Vec<ToolFunction>,
+    history: Vec<Message>,
     client: LlmClient,
 }
 
@@ -12,7 +16,6 @@ impl Chat {
     pub fn new(url: String, model: String) -> Self {
         Chat {
             model,
-            system: vec!["Answer directly and concisely without internal monologue, planning steps, or a chain-of-thought process.".to_string()],
             tools: vec![ToolFunction {
                 name: "GET request".to_string(),
                 desc: "Send a GET request to a URL".to_string(),
@@ -23,29 +26,43 @@ impl Chat {
                 }],
                 exec: "".to_string(),
             }],
-            client: LlmClient::new(url)
+            history: vec![system_message(
+                "Answer directly and concisely without internal monologue, planning steps, or a chain-of-thought process."
+                    .to_string(),
+            )],
+            client: LlmClient::new(url),
         }
     }
 
-    fn request(&self, prompt: String) -> Request {
+    fn request(&self) -> Request {
         Request {
             model: self.model.clone(),
-            system: self.system.concat(),
-            user: prompt,
-            history: vec![],
+            messages: self.history.clone(),
             tools: self.tools.clone(),
         }
     }
 
-    pub async fn start(&self, prompt: String) {
+    pub fn push_tool_result(&mut self, tool_call_id: &str, content: String) {
+        self.history
+            .push(tool_message(tool_call_id.to_string(), content));
+    }
+
+    pub async fn ask(&mut self, prompt: String) {
+        self.history.push(user_message(prompt));
+        self.run().await;
+    }
+
+    #[async_recursion]
+    pub async fn run(&mut self) {
         let color = std::io::stdout().is_terminal();
 
         let mut reasoning_deltas: Vec<String> = Vec::new();
         let mut answer_deltas: Vec<String> = Vec::new();
-        let mut tool_call: Option<ToolCall> = None;
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-        self.client
-            .stream(self.request(prompt), |event| match event {
+        let bot_response = self
+            .client
+            .stream(self.request(), |event| match event {
                 Response::ReasoningDelta { delta } => {
                     reasoning_deltas.push(delta);
                     print_delta(color, &reasoning_deltas)
@@ -54,25 +71,28 @@ impl Chat {
                     answer_deltas.push(delta);
                     print_delta(false, &answer_deltas);
                 }
-                Response::ToolCall { tool } => tool_call = Some(tool),
+                Response::ToolCall { tool } => tool_calls.push(tool),
             })
             .await
             .unwrap();
 
-        let reasoning = reasoning_deltas.concat();
-        let answer = answer_deltas.concat();
-        let tool_call = tool_call;
-
-        if tool_call.is_some() {}
+        self.history.push(bot_response);
+        if tool_calls.len() > 0 {
+            println!("RECUSRING");
+            self.push_tool_result(&tool_calls[0].name, "404 error".to_string());
+            self.run().await
+        } else {
+            println!()
+        }
     }
 }
 
-fn print_delta(color: bool, deltas: &Vec<String>) {
+fn print_delta(color: bool, deltas: &[String]) {
     let delta = &deltas[deltas.len() - 1];
     if color {
-        let _ = print!("\x1b[2m{delta}\x1b[0m");
+        print!("\x1b[2m{delta}\x1b[0m");
     } else {
-        let _ = print!("{delta}");
+        print!("{delta}");
     }
     stdout().flush().unwrap()
 }
