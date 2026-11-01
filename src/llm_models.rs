@@ -24,13 +24,11 @@ pub struct ToolArg {
     pub options: Option<Vec<String>>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct ToolFunction {
     pub name: String,
     pub desc: String,
     pub args: Vec<ToolArg>,
-    pub exec: String,
 }
 
 pub type Message = ChatCompletionRequestMessage;

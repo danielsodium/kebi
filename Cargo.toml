@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.104"
 async-openai = { version = "0.42.3", features = ["chat-completion", "byot"] }
 async-recursion = "1.2.0"
 futures = "0.3"
+mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = {version = "1.54.1", features = [ "full" ]}
+walkdir = "2.5.0"

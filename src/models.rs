@@ -1,31 +1,25 @@
+use crate::tools::ToolRunner;
+
 use super::llm_models::{
-    LlmClient, Message, Request, Response, ToolArg, ToolCall, ToolFunction, system_message,
-    tool_message, user_message,
+    LlmClient, Message, Request, Response, ToolCall, system_message, tool_message, user_message,
 };
-use async_recursion::async_recursion;
+
 use std::io::{IsTerminal, Write, stdout};
 
 pub struct Chat {
     model: String,
-    tools: Vec<ToolFunction>,
+    tools: ToolRunner,
     history: Vec<Message>,
     client: LlmClient,
 }
 
 impl Chat {
     pub fn new(url: String, model: String) -> Self {
+        let tools = ToolRunner::new();
+
         Chat {
             model,
-            tools: vec![ToolFunction {
-                name: "GET request".to_string(),
-                desc: "Send a GET request to a URL".to_string(),
-                args: vec![ToolArg {
-                    name: "URL".to_string(),
-                    description: "URL to send a GET Request to".to_string(),
-                    options: None,
-                }],
-                exec: "".to_string(),
-            }],
+            tools,
             history: vec![system_message(
                 "Answer directly and concisely without internal monologue, planning steps, or a chain-of-thought process."
                     .to_string(),
@@ -38,7 +32,7 @@ impl Chat {
         Request {
             model: self.model.clone(),
             messages: self.history.clone(),
-            tools: self.tools.clone(),
+            tools: self.tools.tools.clone(),
         }
     }
 
@@ -52,37 +46,44 @@ impl Chat {
         self.run().await;
     }
 
-    #[async_recursion]
     pub async fn run(&mut self) {
         let color = std::io::stdout().is_terminal();
 
-        let mut reasoning_deltas: Vec<String> = Vec::new();
-        let mut answer_deltas: Vec<String> = Vec::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        for _ in 0..25 {
+            let mut reasoning_deltas: Vec<String> = Vec::new();
+            let mut answer_deltas: Vec<String> = Vec::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-        let bot_response = self
-            .client
-            .stream(self.request(), |event| match event {
-                Response::ReasoningDelta { delta } => {
-                    reasoning_deltas.push(delta);
-                    print_delta(color, &reasoning_deltas)
-                }
-                Response::AnswerDelta { delta } => {
-                    answer_deltas.push(delta);
-                    print_delta(false, &answer_deltas);
-                }
-                Response::ToolCall { tool } => tool_calls.push(tool),
-            })
-            .await
-            .unwrap();
+            let bot_response = self
+                .client
+                .stream(self.request(), |event| match event {
+                    Response::ReasoningDelta { delta } => {
+                        reasoning_deltas.push(delta);
+                        print_delta(color, &reasoning_deltas)
+                    }
+                    Response::AnswerDelta { delta } => {
+                        answer_deltas.push(delta);
+                        print_delta(false, &answer_deltas);
+                    }
+                    Response::ToolCall { tool } => tool_calls.push(tool),
+                })
+                .await
+                .unwrap();
 
-        self.history.push(bot_response);
-        if !tool_calls.is_empty() {
-            println!("Ran {}", &tool_calls.first().unwrap().name);
-            self.push_tool_result(&tool_calls.first().unwrap().id, "404 error".to_string());
-            self.run().await
-        } else {
-            println!()
+            self.history.push(bot_response);
+            if !tool_calls.is_empty() {
+                let call = &tool_calls.first().unwrap();
+                println!("Ran {}...", call.name);
+                let result = self
+                    .tools
+                    .run(&call.name, &call.args)
+                    .unwrap_or_else(|err| err.to_string());
+                println!("Tool returned: {}", result);
+                self.push_tool_result(&call.id, result);
+            } else {
+                println!();
+                break;
+            }
         }
     }
 }
