@@ -11,6 +11,7 @@ pub struct Chat {
     tools: ToolRunner,
     history: Vec<Message>,
     client: LlmClient,
+    max_tokens: Option<u32>,
 }
 
 impl Chat {
@@ -25,6 +26,9 @@ impl Chat {
                     .to_string(),
             )],
             client: LlmClient::new(url),
+            max_tokens: std::env::var("KEBI_MAX_TOKENS")
+                .ok()
+                .and_then(|value| value.parse().ok()),
         }
     }
 
@@ -33,6 +37,7 @@ impl Chat {
             model: self.model.clone(),
             messages: self.history.clone(),
             tools: self.tools.tools.clone(),
+            max_tokens: self.max_tokens,
         }
     }
 
@@ -48,13 +53,14 @@ impl Chat {
 
     pub async fn run(&mut self) {
         let color = std::io::stdout().is_terminal();
+        let mut finished = false;
 
         for _ in 0..25 {
             let mut reasoning_deltas: Vec<String> = Vec::new();
             let mut answer_deltas: Vec<String> = Vec::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-            let bot_response = self
+            let outcome = match self
                 .client
                 .stream(self.request(), |event| match event {
                     Response::ReasoningDelta { delta } => {
@@ -68,22 +74,65 @@ impl Chat {
                     Response::ToolCall { tool } => tool_calls.push(tool),
                 })
                 .await
-                .unwrap();
+            {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    eprintln!("\nRequest failed: {err}");
+                    return;
+                }
+            };
 
-            self.history.push(bot_response);
+            self.history.push(outcome.message);
+
+            if let Some(err) = &outcome.error {
+                eprintln!("\nStream interrupted: {err}");
+            }
+
+            match outcome.finish_reason.as_deref() {
+                Some("length") => eprintln!(
+                    "\nResponse truncated: the model hit the token limit before finishing. Set KEBI_MAX_TOKENS to a larger value."
+                ),
+                Some(_) => {}
+                None if outcome.error.is_none() => {
+                    eprintln!("\nStream ended before the model finished (connection closed early).")
+                }
+                None => {}
+            }
+
             if !tool_calls.is_empty() {
-                let call = &tool_calls.first().unwrap();
-                println!("Ran {}...", call.name);
-                let result = self
-                    .tools
-                    .run(&call.name, &call.args)
-                    .unwrap_or_else(|err| err.to_string());
-                println!("Tool returned: {}", result);
-                self.push_tool_result(&call.id, result);
+                for call in &tool_calls {
+                    println!("Ran {}...", call.name);
+                    let mut result = self
+                        .tools
+                        .run(&call.name, &call.args)
+                        .unwrap_or_else(|err| err.to_string());
+
+                    match self.tools.refresh() {
+                        Ok(outcome) => {
+                            if !outcome.errors.is_empty() {
+                                result.push_str("\n\nTool reload errors:");
+                                for err in outcome.errors {
+                                    result.push_str(&format!("\n- {err}"));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            result.push_str(&format!("\n\nFailed to refresh tools: {err}"));
+                        }
+                    }
+
+                    println!("Tool returned: {}", result);
+                    self.push_tool_result(&call.id, result);
+                }
             } else {
                 println!();
+                finished = true;
                 break;
             }
+        }
+
+        if !finished {
+            eprintln!("Stopped after 25 tool iterations without a final answer.");
         }
     }
 }

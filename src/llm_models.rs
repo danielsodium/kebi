@@ -58,6 +58,7 @@ pub struct Request {
     pub model: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolFunction>,
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -68,10 +69,13 @@ struct StreamChunk {
 
 #[derive(Deserialize)]
 struct StreamChoice {
+    #[serde(default)]
     delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct StreamDelta {
     content: Option<String>,
     reasoning_content: Option<String>,
@@ -96,6 +100,12 @@ pub enum Response {
     ReasoningDelta { delta: String },
     AnswerDelta { delta: String },
     ToolCall { tool: ToolCall },
+}
+
+pub struct StreamResult {
+    pub message: Message,
+    pub finish_reason: Option<String>,
+    pub error: Option<String>,
 }
 
 fn to_chat_tool(tool: ToolFunction) -> ChatCompletionTools {
@@ -145,6 +155,7 @@ impl Request {
                 Some(self.tools.into_iter().map(to_chat_tool).collect())
             },
             stream: Some(true),
+            max_completion_tokens: self.max_tokens,
             //temperature: Some(0.2),
             //presence_penalty: Some(0.1),
             ..Default::default()
@@ -167,7 +178,7 @@ impl LlmClient {
         &self,
         request: Request,
         mut on_event: F,
-    ) -> Result<Message, async_openai::error::OpenAIError>
+    ) -> Result<StreamResult, async_openai::error::OpenAIError>
     where
         F: FnMut(Response),
     {
@@ -179,16 +190,32 @@ impl LlmClient {
 
         let mut content = String::new();
         let mut tool_calls: BTreeMap<u32, PendingToolCall> = BTreeMap::new();
+        let mut finish_reason: Option<String> = None;
+        let mut error: Option<String> = None;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    error = Some(err.to_string());
+                    break;
+                }
+            };
 
             for choice in chunk.choices {
-                let StreamDelta {
-                    content: content_delta,
-                    reasoning_content,
-                    tool_calls: calls,
-                } = choice.delta;
+                let StreamChoice {
+                    delta:
+                        StreamDelta {
+                            content: content_delta,
+                            reasoning_content,
+                            tool_calls: calls,
+                        },
+                    finish_reason: choice_finish_reason,
+                } = choice;
+
+                if choice_finish_reason.is_some() {
+                    finish_reason = choice_finish_reason;
+                }
 
                 if let Some(delta) = reasoning_content {
                     on_event(Response::ReasoningDelta { delta });
@@ -221,61 +248,73 @@ impl LlmClient {
 
         let mut assistant_tool_calls = Vec::new();
 
-        for (_, pending) in tool_calls {
-            let PendingToolCall {
-                id,
-                name,
-                arguments: raw_args,
-            } = pending;
+        // Only trust tool calls once the server has signalled that the message is
+        // complete. A stream that ends early can leave us with a partially
+        // streamed argument string, and running a tool with truncated args is
+        // worse than reporting the incomplete response.
+        let complete = error.is_none() && finish_reason.is_some();
 
-            let parsed: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&raw_args).unwrap_or_default();
-
-            let args: HashMap<String, String> = parsed
-                .into_iter()
-                .map(|(key, value)| {
-                    let value = match value {
-                        serde_json::Value::String(s) => s,
-                        other => other.to_string(),
-                    };
-                    (key, value)
-                })
-                .collect();
-
-            assistant_tool_calls.push(ChatCompletionMessageToolCalls::Function(
-                ChatCompletionMessageToolCall {
-                    id: id.clone(),
-                    function: FunctionCall {
-                        name: name.clone(),
-                        arguments: raw_args.clone(),
-                    },
-                },
-            ));
-
-            on_event(Response::ToolCall {
-                tool: ToolCall {
+        if complete {
+            for (_, pending) in tool_calls {
+                let PendingToolCall {
                     id,
                     name,
-                    args,
-                    raw_arguments: raw_args,
-                },
-            });
+                    arguments: raw_args,
+                } = pending;
+
+                let parsed: HashMap<String, serde_json::Value> =
+                    serde_json::from_str(&raw_args).unwrap_or_default();
+
+                let args: HashMap<String, String> = parsed
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let value = match value {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        };
+                        (key, value)
+                    })
+                    .collect();
+
+                assistant_tool_calls.push(ChatCompletionMessageToolCalls::Function(
+                    ChatCompletionMessageToolCall {
+                        id: id.clone(),
+                        function: FunctionCall {
+                            name: name.clone(),
+                            arguments: raw_args.clone(),
+                        },
+                    },
+                ));
+
+                on_event(Response::ToolCall {
+                    tool: ToolCall {
+                        id,
+                        name,
+                        args,
+                        raw_arguments: raw_args,
+                    },
+                });
+            }
         }
 
-        Ok(ChatCompletionRequestMessage::Assistant(
-            ChatCompletionRequestAssistantMessage {
-                content: if content.is_empty() {
-                    None
-                } else {
-                    Some(ChatCompletionRequestAssistantMessageContent::Text(content))
+        Ok(StreamResult {
+            message: ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: if content.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionRequestAssistantMessageContent::Text(content))
+                    },
+                    tool_calls: if assistant_tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(assistant_tool_calls)
+                    },
+                    ..Default::default()
                 },
-                tool_calls: if assistant_tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(assistant_tool_calls)
-                },
-                ..Default::default()
-            },
-        ))
+            ),
+            finish_reason,
+            error,
+        })
     }
 }
