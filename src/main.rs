@@ -8,9 +8,11 @@ use pipeline::Runner;
 
 #[tokio::main]
 async fn main() {
-    let runner = Runner::default();
-    runner.load().unwrap();
-    let run = runner.run("test".to_string()).await;
+    let mut runner = Runner::new().unwrap();
+    runner.run("test".to_string());
+    loop {
+        runner.step().await
+    }
 
     /*
     let mut chat = Chat::new(
