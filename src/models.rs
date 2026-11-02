@@ -55,7 +55,7 @@ impl Chat {
         let color = std::io::stdout().is_terminal();
         let mut finished = false;
 
-        for _ in 0..25 {
+        for _ in 0..500 {
             let mut reasoning_deltas: Vec<String> = Vec::new();
             let mut answer_deltas: Vec<String> = Vec::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -102,25 +102,10 @@ impl Chat {
             if !tool_calls.is_empty() {
                 for call in &tool_calls {
                     println!("Ran {}...", call.name);
-                    let mut result = self
+                    let result = self
                         .tools
                         .run(&call.name, &call.args)
                         .unwrap_or_else(|err| err.to_string());
-
-                    match self.tools.refresh() {
-                        Ok(outcome) => {
-                            if !outcome.errors.is_empty() {
-                                result.push_str("\n\nTool reload errors:");
-                                for err in outcome.errors {
-                                    result.push_str(&format!("\n- {err}"));
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            result.push_str(&format!("\n\nFailed to refresh tools: {err}"));
-                        }
-                    }
-
                     println!("Tool returned: {}", result);
                     self.push_tool_result(&call.id, result);
                 }
@@ -132,7 +117,7 @@ impl Chat {
         }
 
         if !finished {
-            eprintln!("Stopped after 25 tool iterations without a final answer.");
+            eprintln!("Stopped after 500 tool iterations without a final answer.");
         }
     }
 }

@@ -2,19 +2,11 @@ pub mod llm_models;
 pub mod models;
 pub mod pipeline;
 pub mod tools;
-//use models::Chat;
-//use std::io::{self, Write};
-use pipeline::Runner;
+use models::Chat;
+use std::io::{self, Write};
 
 #[tokio::main]
 async fn main() {
-    let mut runner = Runner::new().unwrap();
-    runner.run("test".to_string());
-    loop {
-        runner.step().await
-    }
-
-    /*
     let mut chat = Chat::new(
         "http://localhost:8080/v1".to_string(),
         std::env::var("KEBI_MODEL").unwrap_or_else(|_| "default".to_string()),
@@ -27,5 +19,4 @@ async fn main() {
         .expect("Failed to get prompt");
 
     chat.ask(prompt.trim().to_string()).await;
-    */
 }
