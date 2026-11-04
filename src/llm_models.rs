@@ -2,34 +2,17 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
-        ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
-        ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
-        ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
-        ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, FunctionCall,
-        FunctionObject,
+        ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest, ResponseFormat,
+        ResponseFormatJsonSchema,
     },
 };
 use futures::StreamExt;
+use schemars::JsonSchema;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct ToolArg {
-    pub name: String,
-    pub description: String,
-    pub options: Option<Vec<String>>,
-}
-
-#[derive(Clone)]
-pub struct ToolFunction {
-    pub name: String,
-    pub desc: String,
-    pub args: Vec<ToolArg>,
-}
+use serde::de::DeserializeOwned;
 
 pub type Message = ChatCompletionRequestMessage;
 
@@ -47,17 +30,9 @@ pub fn user_message(content: String) -> Message {
     })
 }
 
-pub fn tool_message(tool_call_id: String, content: String) -> Message {
-    ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
-        content: ChatCompletionRequestToolMessageContent::Text(content),
-        tool_call_id,
-    })
-}
-
 pub struct Request {
     pub model: String,
     pub messages: Vec<Message>,
-    pub tools: Vec<ToolFunction>,
     pub max_tokens: Option<u32>,
 }
 
@@ -79,85 +54,105 @@ struct StreamChoice {
 struct StreamDelta {
     content: Option<String>,
     reasoning_content: Option<String>,
-    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
-}
-
-#[derive(Default)]
-struct PendingToolCall {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub args: HashMap<String, String>,
-    pub raw_arguments: String,
 }
 
 pub enum Response {
     ReasoningDelta { delta: String },
-    AnswerDelta { delta: String },
-    ToolCall { tool: ToolCall },
+    ContentDelta { delta: String },
 }
 
-pub struct StreamResult {
+pub struct StreamResult<T> {
     pub message: Message,
     pub finish_reason: Option<String>,
     pub error: Option<String>,
+    pub parse_error: Option<String>,
+    pub parsed: Option<T>,
 }
 
-fn to_chat_tool(tool: ToolFunction) -> ChatCompletionTools {
-    let properties: serde_json::Map<String, serde_json::Value> = tool
-        .args
-        .into_iter()
-        .map(|arg| {
-            let mut schema = serde_json::json!({
-                "type": "string",
-                "description": arg.description,
-            });
-
-            if let Some(options) = arg.options {
-                schema["oneOf"] = serde_json::Value::Array(
-                    options
-                        .into_iter()
-                        .map(|option| serde_json::json!({ "const": option }))
-                        .collect(),
-                );
+fn schema_name<T: JsonSchema>() -> String {
+    let name: String = T::schema_name()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
             }
-
-            (arg.name, schema)
         })
         .collect();
 
-    ChatCompletionTools::Function(ChatCompletionTool {
-        function: FunctionObject {
-            name: tool.name,
-            description: Some(tool.desc),
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": properties,
-            })),
-            strict: None,
+    if name.is_empty() {
+        "structured_output".to_string()
+    } else {
+        name.chars().take(64).collect()
+    }
+}
+
+fn normalize_strict(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            map.remove("$schema");
+            map.remove("title");
+
+            if map.get("type").and_then(|value| value.as_str()) == Some("object") {
+                map.insert(
+                    "additionalProperties".to_string(),
+                    serde_json::Value::Bool(false),
+                );
+
+                if let Some(serde_json::Value::Object(properties)) = map.get("properties") {
+                    let required = properties
+                        .keys()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect();
+                    map.insert("required".to_string(), serde_json::Value::Array(required));
+                }
+            }
+
+            for (key, value) in map.iter_mut() {
+                if key == "properties" {
+                    if let serde_json::Value::Object(properties) = value {
+                        for property in properties.values_mut() {
+                            normalize_strict(property);
+                        }
+                    }
+                } else if key != "required" && key != "additionalProperties" {
+                    normalize_strict(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_strict(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn structured_format<T: JsonSchema>() -> ResponseFormat {
+    let schema = schemars::schema_for!(T);
+    let mut schema = serde_json::to_value(schema).expect("json schema should serialize");
+    normalize_strict(&mut schema);
+
+    ResponseFormat::JsonSchema {
+        json_schema: ResponseFormatJsonSchema {
+            description: None,
+            name: schema_name::<T>(),
+            schema,
+            strict: Some(true),
         },
-    })
+    }
 }
 
 impl Request {
-    pub fn into_chat_request(self) -> CreateChatCompletionRequest {
+    fn into_chat_request(self) -> CreateChatCompletionRequest {
         CreateChatCompletionRequest {
             model: self.model,
             messages: self.messages,
-            tools: if self.tools.is_empty() {
-                None
-            } else {
-                Some(self.tools.into_iter().map(to_chat_tool).collect())
-            },
             stream: Some(true),
             max_completion_tokens: self.max_tokens,
-            //temperature: Some(0.2),
-            //presence_penalty: Some(0.1),
             ..Default::default()
         }
     }
@@ -174,22 +169,25 @@ impl LlmClient {
         }
     }
 
-    pub async fn stream<F>(
+    pub async fn stream<T, F>(
         &self,
         request: Request,
         mut on_event: F,
-    ) -> Result<StreamResult, async_openai::error::OpenAIError>
+    ) -> Result<StreamResult<T>, async_openai::error::OpenAIError>
     where
+        T: JsonSchema + DeserializeOwned,
         F: FnMut(Response),
     {
+        let mut chat_request = request.into_chat_request();
+        chat_request.response_format = Some(structured_format::<T>());
+
         let mut stream = self
             .client
             .chat()
-            .create_stream_byot::<_, StreamChunk>(request.into_chat_request())
+            .create_stream_byot::<_, StreamChunk>(chat_request)
             .await?;
 
         let mut content = String::new();
-        let mut tool_calls: BTreeMap<u32, PendingToolCall> = BTreeMap::new();
         let mut finish_reason: Option<String> = None;
         let mut error: Option<String> = None;
 
@@ -208,7 +206,6 @@ impl LlmClient {
                         StreamDelta {
                             content: content_delta,
                             reasoning_content,
-                            tool_calls: calls,
                         },
                     finish_reason: choice_finish_reason,
                 } = choice;
@@ -223,77 +220,22 @@ impl LlmClient {
 
                 if let Some(delta) = content_delta {
                     content.push_str(&delta);
-                    on_event(Response::AnswerDelta { delta });
-                }
-
-                if let Some(calls) = calls {
-                    for call in calls {
-                        let entry = tool_calls.entry(call.index).or_default();
-
-                        if let Some(id) = call.id {
-                            entry.id = id;
-                        }
-                        if let Some(function) = call.function {
-                            if let Some(name) = function.name {
-                                entry.name = name;
-                            }
-                            if let Some(arguments) = function.arguments {
-                                entry.arguments.push_str(&arguments);
-                            }
-                        }
-                    }
+                    on_event(Response::ContentDelta { delta });
                 }
             }
         }
 
-        let mut assistant_tool_calls = Vec::new();
-
-        // Only trust tool calls once the server has signalled that the message is
-        // complete. A stream that ends early can leave us with a partially
-        // streamed argument string, and running a tool with truncated args is
-        // worse than reporting the incomplete response.
+        // Only parse structured output once the server has signalled that the
+        // message is complete. A stream that ends early can leave us with a
+        // truncated JSON document.
         let complete = error.is_none() && finish_reason.is_some();
+        let mut parsed = None;
+        let mut parse_error = None;
 
         if complete {
-            for (_, pending) in tool_calls {
-                let PendingToolCall {
-                    id,
-                    name,
-                    arguments: raw_args,
-                } = pending;
-
-                let parsed: HashMap<String, serde_json::Value> =
-                    serde_json::from_str(&raw_args).unwrap_or_default();
-
-                let args: HashMap<String, String> = parsed
-                    .into_iter()
-                    .map(|(key, value)| {
-                        let value = match value {
-                            serde_json::Value::String(s) => s,
-                            other => other.to_string(),
-                        };
-                        (key, value)
-                    })
-                    .collect();
-
-                assistant_tool_calls.push(ChatCompletionMessageToolCalls::Function(
-                    ChatCompletionMessageToolCall {
-                        id: id.clone(),
-                        function: FunctionCall {
-                            name: name.clone(),
-                            arguments: raw_args.clone(),
-                        },
-                    },
-                ));
-
-                on_event(Response::ToolCall {
-                    tool: ToolCall {
-                        id,
-                        name,
-                        args,
-                        raw_arguments: raw_args,
-                    },
-                });
+            match serde_json::from_str::<T>(&content) {
+                Ok(value) => parsed = Some(value),
+                Err(err) => parse_error = Some(err.to_string()),
             }
         }
 
@@ -305,16 +247,13 @@ impl LlmClient {
                     } else {
                         Some(ChatCompletionRequestAssistantMessageContent::Text(content))
                     },
-                    tool_calls: if assistant_tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(assistant_tool_calls)
-                    },
                     ..Default::default()
                 },
             ),
             finish_reason,
             error,
+            parse_error,
+            parsed,
         })
     }
 }

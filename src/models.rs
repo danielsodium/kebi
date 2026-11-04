@@ -1,34 +1,40 @@
-use crate::tools::ToolRunner;
+use super::llm_models::{LlmClient, Message, Request, Response, system_message, user_message};
+use super::tools::{ToolCall, ToolManager};
 
-use super::llm_models::{
-    LlmClient, Message, Request, Response, ToolCall, system_message, tool_message, user_message,
-};
-
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::io::{IsTerminal, Write, stdout};
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct Answer {
+    answer: Option<String>,
+    tool_call: Option<ToolCall>,
+}
 
 pub struct Chat {
     model: String,
-    tools: ToolRunner,
     history: Vec<Message>,
     client: LlmClient,
     max_tokens: Option<u32>,
+    tools: ToolManager,
 }
 
 impl Chat {
     pub fn new(url: String, model: String) -> Self {
-        let tools = ToolRunner::new();
-
+        let tools = ToolManager::new();
         Chat {
             model,
-            tools,
             history: vec![system_message(
-                "Answer directly and concisely without internal monologue, planning steps, or a chain-of-thought process."
-                    .to_string(),
+                "You are a concise, capable AI assistant. Answer directly without filler.\n\n"
+                    .to_string()
+                    + &tools.prompt()
+                    + "# Output Format\nRespond directly:\n{\"reply\": \"concise answer\"}\nOr call a tool:\n{\"tool\": \"tool_name\", \"args\": {\"arg1\": \"val\"}}",
             )],
             client: LlmClient::new(url),
             max_tokens: std::env::var("KEBI_MAX_TOKENS")
                 .ok()
                 .and_then(|value| value.parse().ok()),
+            tools,
         }
     }
 
@@ -36,14 +42,8 @@ impl Chat {
         Request {
             model: self.model.clone(),
             messages: self.history.clone(),
-            tools: self.tools.tools.clone(),
             max_tokens: self.max_tokens,
         }
-    }
-
-    pub fn push_tool_result(&mut self, tool_call_id: &str, content: String) {
-        self.history
-            .push(tool_message(tool_call_id.to_string(), content));
     }
 
     pub async fn ask(&mut self, prompt: String) {
@@ -53,71 +53,62 @@ impl Chat {
 
     pub async fn run(&mut self) {
         let color = std::io::stdout().is_terminal();
-        let mut finished = false;
+        let mut reasoning_deltas: Vec<String> = Vec::new();
 
-        for _ in 0..500 {
-            let mut reasoning_deltas: Vec<String> = Vec::new();
-            let mut answer_deltas: Vec<String> = Vec::new();
-            let mut tool_calls: Vec<ToolCall> = Vec::new();
-
-            let outcome = match self
-                .client
-                .stream(self.request(), |event| match event {
-                    Response::ReasoningDelta { delta } => {
-                        reasoning_deltas.push(delta);
-                        print_delta(color, &reasoning_deltas)
-                    }
-                    Response::AnswerDelta { delta } => {
-                        answer_deltas.push(delta);
-                        print_delta(false, &answer_deltas);
-                    }
-                    Response::ToolCall { tool } => tool_calls.push(tool),
-                })
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(err) => {
-                    eprintln!("\nRequest failed: {err}");
-                    return;
+        let outcome = match self
+            .client
+            .stream::<Answer, _>(self.request(), |event| {
+                if let Response::ReasoningDelta { delta } = event {
+                    reasoning_deltas.push(delta);
+                    print_delta(color, &reasoning_deltas);
                 }
-            };
-
-            self.history.push(outcome.message);
-
-            if let Some(err) = &outcome.error {
-                eprintln!("\nStream interrupted: {err}");
+            })
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                eprintln!("\nRequest failed: {err}");
+                return;
             }
+        };
 
-            match outcome.finish_reason.as_deref() {
-                Some("length") => eprintln!(
-                    "\nResponse truncated: the model hit the token limit before finishing. Set KEBI_MAX_TOKENS to a larger value."
-                ),
-                Some(_) => {}
-                None if outcome.error.is_none() => {
-                    eprintln!("\nStream ended before the model finished (connection closed early).")
-                }
-                None => {}
-            }
+        self.history.push(outcome.message);
 
-            if !tool_calls.is_empty() {
-                for call in &tool_calls {
-                    println!("Ran {}...", call.name);
-                    let result = self
-                        .tools
-                        .run(&call.name, &call.args)
-                        .unwrap_or_else(|err| err.to_string());
-                    println!("Tool returned: {}", result);
-                    self.push_tool_result(&call.id, result);
-                }
-            } else {
-                println!();
-                finished = true;
-                break;
+        if let Some(err) = &outcome.error {
+            eprintln!("\nStream interrupted: {err}");
+            return;
+        }
+
+        match outcome.finish_reason.as_deref() {
+            Some("length") => eprintln!(
+                "\nResponse truncated: the model hit the token limit before finishing. Set KEBI_MAX_TOKENS to a larger value."
+            ),
+            Some(_) => {}
+            None => {
+                eprintln!("\nStream ended before the model finished (connection closed early).");
+                return;
             }
         }
 
-        if !finished {
-            eprintln!("Stopped after 500 tool iterations without a final answer.");
+        if let Some(err) = &outcome.parse_error {
+            eprintln!("\nFailed to parse structured output: {err}");
+            return;
+        }
+
+        let Some(Answer { answer, tool_call }) = outcome.parsed else {
+            eprintln!("\nThe model did not return a structured answer.");
+            return;
+        };
+
+        if !reasoning_deltas.is_empty() {
+            println!();
+        }
+        if let Some(answer) = answer {
+            println!("{answer}");
+        }
+        if let Some(tool_call) = tool_call {
+            let tn = tool_call.name;
+            println!("{tn}");
         }
     }
 }
