@@ -10,7 +10,6 @@ use async_openai::{
     },
 };
 use futures::StreamExt;
-use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -69,25 +68,6 @@ pub struct StreamResult<T> {
     pub parsed: Option<T>,
 }
 
-fn schema_name<T: JsonSchema>() -> String {
-    let name: String = T::schema_name()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-
-    if name.is_empty() {
-        "structured_output".to_string()
-    } else {
-        name.chars().take(64).collect()
-    }
-}
-
 fn normalize_strict(schema: &mut serde_json::Value) {
     match schema {
         serde_json::Value::Object(map) => {
@@ -131,15 +111,13 @@ fn normalize_strict(schema: &mut serde_json::Value) {
     }
 }
 
-fn structured_format<T: JsonSchema>() -> ResponseFormat {
-    let schema = schemars::schema_for!(T);
-    let mut schema = serde_json::to_value(schema).expect("json schema should serialize");
+fn structured_format(name: &str, mut schema: serde_json::Value) -> ResponseFormat {
     normalize_strict(&mut schema);
 
     ResponseFormat::JsonSchema {
         json_schema: ResponseFormatJsonSchema {
             description: None,
-            name: schema_name::<T>(),
+            name: name.to_string(),
             schema,
             strict: Some(true),
         },
@@ -172,14 +150,15 @@ impl LlmClient {
     pub async fn stream<T, F>(
         &self,
         request: Request,
+        schema: serde_json::Value,
         mut on_event: F,
     ) -> Result<StreamResult<T>, async_openai::error::OpenAIError>
     where
-        T: JsonSchema + DeserializeOwned,
+        T: DeserializeOwned,
         F: FnMut(Response),
     {
         let mut chat_request = request.into_chat_request();
-        chat_request.response_format = Some(structured_format::<T>());
+        chat_request.response_format = Some(structured_format("answer", schema));
 
         let mut stream = self
             .client

@@ -11,10 +11,12 @@ futures = "0.3"
 mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
 mpsc = "0.3.0"
 reqwest = "0.13.5"
-schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = {version = "1.54.1", features = [ "full" ]}
 tokio-util = "0.7.20"
 uuid = { version = "1.29.0", features = ["v4"] }
 walkdir = "2.5.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sqlite-vec = "0.1"
+fastembed = "7.5.0"
