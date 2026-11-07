@@ -9,13 +9,15 @@ pub struct ToolManager {
     tools: BTreeMap<String, Tool>,
 }
 
-type ToolFuture<'a> = Pin<Box<dyn Future<Output = String> + 'a>>;
+type ToolFuture<'a> = Pin<Box<dyn Future<Output = String> + Send + 'a>>;
 
 struct Tool {
     name: String,
     description: String,
     args: Vec<ToolArgSpec>,
-    lambda: Box<dyn for<'a> Fn(&'a HashMap<String, String>, &'a mut Memory) -> ToolFuture<'a>>,
+    lambda: Box<
+        dyn for<'a> Fn(&'a HashMap<String, String>, &'a mut Memory) -> ToolFuture<'a> + Send + Sync,
+    >,
 }
 
 struct ToolArgSpec {
@@ -176,7 +178,7 @@ async fn search_memory(args: &HashMap<String, String>, memory: &mut Memory) -> S
         return "[FAILED]: missing `query` argument".to_string();
     };
 
-    match memory.get_context(text) {
+    match memory.get_context(text).await {
         Ok(res) if res.is_empty() => "[SEARCH]\n(No matching memories found)".to_string(),
         Ok(res) => format!("[SEARCH]\n- {}", res.join("\n- ")),
         Err(e) => format!("[FAILED] {}", e),

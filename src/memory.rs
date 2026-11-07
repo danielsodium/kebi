@@ -48,8 +48,8 @@ impl Memory {
         })
     }
 
-    pub fn insert(&mut self, msg: &String) -> Result<()> {
-        let vector = self.embedder.embed(&msg)?;
+    pub async fn insert(&mut self, msg: &String) -> Result<()> {
+        let vector = self.embedder.embed(&msg).await?;
         self.conn
             .execute("INSERT INTO memories (text) VALUES (?)", params![msg])?;
         let mem_id = self.conn.last_insert_rowid();
@@ -60,8 +60,8 @@ impl Memory {
         Ok(())
     }
 
-    pub fn get_context(&mut self, query: &String) -> Result<Vec<String>> {
-        let search_vector = self.embedder.embed(query)?;
+    pub async fn get_context(&mut self, query: &String) -> Result<Vec<String>> {
+        let search_vector = self.embedder.embed(query).await?;
 
         // Query for the top 25 closest matches within the distance cutoff
         let mut stmt = self.conn.prepare(

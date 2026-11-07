@@ -98,7 +98,7 @@ impl Chat {
 
     pub async fn ask(&mut self, prompt: String) {
         if self.history.is_empty() {
-            let context = self.memory.get_context(&prompt).unwrap();
+            let context = self.memory.get_context(&prompt).await.unwrap();
             let context_block = if context.is_empty() {
                 "<retrieved_context>\n(none)\n</retrieved_context>".to_string()
             } else {
@@ -120,8 +120,6 @@ impl Chat {
     }
 
     pub async fn run(&mut self) {
-        //let color = std::io::stdout().is_terminal();
-
         for _ in 0..MAX_TOOL_ROUNDS {
             let mut reasoning_deltas: Vec<String> = Vec::new();
             let mut answer_deltas: Vec<String> = Vec::new();
@@ -193,6 +191,7 @@ impl Chat {
                 for mem in memory_ops {
                     self.memory
                         .insert(&mem.content)
+                        .await
                         .unwrap_or_else(|e| eprintln!("Failed to save to memory: {}", e));
                 }
             }
