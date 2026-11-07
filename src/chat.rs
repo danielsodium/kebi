@@ -8,11 +8,14 @@ use std::io::{Write, stdout};
 static PROMPT: &str = r#"
 ### Decision Order (Follow Every Turn)
 
-1. `memory_ops` — Save New User Facts Immediately
-   - Check if the user's latest message states any NEW personal fact, preference, goal, or detail not already in `<retrieved_context>` or conversation history.
-   - For each new fact, add `{"op": "mem_save", "content": "<standalone 1-sentence fact>"}` (e.g., `"User's dog is named Mochi."`).
-   - Save new facts on the exact turn the user mentions them, even if you are also calling a tool on this turn.
-   - Never save duplicate facts or assistant responses. When running after a `Tool ... returned:` message or when no new fact was shared, set `"memory_ops": []`.
+1. `memory_ops` — Save Only High-Value Facts in Telegraphic Format
+   - WHAT TO SAVE: Only lasting personal facts, preferences, constraints, relationships, ongoing projects, or key dates from the user's latest message that are NOT already in `<retrieved_context>` or history.
+   - WHAT TO IGNORE: Never save greetings, chitchat, one-off questions, temporary states ("I'm tired", "headed out"), general world facts, or assistant replies. When running after `Tool ... returned:` or when no lasting fact was shared, set `"memory_ops": []`.
+   - TOKEN-EFFICIENT FORMAT: In `{"op": "mem_save", "content": "..."}`, write `content` as ultra-compact `<topic>: <keywords/value>` shorthand (3–7 words max):
+     - Strip "User", "The user is", articles (`a`, `an`, `the`), verbs like `is/has/likes`, and punctuation filler.
+     - Good: `"allergy: peanuts"`, `"dog: Mochi"`, `"location: Seattle"`, `"coffee: dark roast, oat milk"`, `"stack: Rust, SQLite"`.
+     - Bad: `"The user is allergic to peanuts and cannot eat them."` (too wordy).
+   - Save immediately on the turn the user mentions the fact, even if also calling a tool.
 
 2. `tool_call` — Check Context First, Search Memory When Needed
    - First check `<retrieved_context>` and the conversation history.
@@ -31,13 +34,13 @@ static PROMPT: &str = r#"
 ### Output Examples
 
 User shares a new fact and asks something not in `<retrieved_context>`:
-{"memory_ops":[{"op":"mem_save","content":"User is allergic to peanuts."}],"response":null,"tool_call":{"name":"search-memory","args":{"query":"favorite restaurants dietary preferences"}}}
+{"memory_ops":[{"op":"mem_save","content":"allergy: peanuts"}],"response":null,"tool_call":{"name":"search-memory","args":{"query":"favorite restaurants dietary"}}}
 
 User shares a new fact and no tool is needed:
-{"memory_ops":[{"op":"mem_save","content":"User lives in Seattle."}],"response":"Got it! What kind of coffee spots are you looking for in Seattle?","tool_call":null}
+{"memory_ops":[{"op":"mem_save","content":"location: Seattle"},{"op":"mem_save","content":"coffee: dark roast, oat milk"}],"response":"Got it! What neighborhood in Seattle are you looking for coffee spots in?","tool_call":null}
 
-Replying after a tool result or when no new user fact was shared:
-{"memory_ops":[],"response":"Based on your notes, your dentist appointment is on Thursday at 2 PM.","tool_call":null}
+Replying after a tool result or when no lasting user fact was shared:
+{"memory_ops":[],"response":"Your dentist appointment is Thursday at 2 PM.","tool_call":null}
 "#;
 
 const MAX_TOOL_ROUNDS: usize = 500;

@@ -118,7 +118,7 @@ impl ToolManager {
                             },
                             "content": {
                                 "type": "string",
-                                "description": "A concise, standalone 1-sentence fact about the user."
+                                "description": "Telegraphic '<topic>: <keywords>' note (3-7 words, no filler)."
                             }
                         },
                         "required": ["op", "content"],
