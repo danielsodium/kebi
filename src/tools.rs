@@ -48,20 +48,20 @@ impl ToolManager {
     }
 
     pub fn prompt(&self) -> String {
-        let mut prompt = String::from("<tools>");
+        let mut prompt = String::from("<tools>\n");
         for tool in self.tools.values() {
             let args = tool
                 .args
                 .iter()
-                .map(|arg| format!("{}: string", arg.name))
+                .map(|arg| format!("{}: string ({})", arg.name, arg.description))
                 .collect::<Vec<_>>()
                 .join(", ");
             prompt.push_str(&format!(
-                "\n- `{}`({}) // {}\n",
+                "- `{}`({}) — {}\n",
                 tool.name, args, tool.description
             ));
-            prompt.push_str("</tools>\n");
         }
+        prompt.push_str("</tools>\n");
         prompt
     }
 
@@ -108,28 +108,34 @@ impl ToolManager {
             "properties": {
                 "memory_ops": {
                     "type": "array",
-                    "description": "Memory operations to perform",
+                    "description": "New facts about the user learned in the latest message. Empty array [] if none.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "op": { "type": "string" },
-                            "content": { "type": "string" }
+                            "op": {
+                                "type": "string",
+                                "enum": ["mem_save"]
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "A concise, standalone 1-sentence fact about the user."
+                            }
                         },
                         "required": ["op", "content"],
                         "additionalProperties": false
                     },
                     "default": []
                 },
-                "response": {
-                    "type": ["string", "null"],
-                    "description": "The final response to the user, or null when calling a tool."
-                },
                 "tool_call": {
-                    "description": "A valid tool call, or null when answering the user.",
+                    "description": "A tool call to execute when information is missing from <retrieved_context>, or null when ready to respond.",
                     "anyOf": tool_call_variants,
                 },
+                "response": {
+                    "type": ["string", "null"],
+                    "description": "The concise reply to the user when tool_call is null, or null when calling a tool."
+                },
             },
-            "required": ["response", "tool_call", "memory_ops"],
+            "required": ["memory_ops", "tool_call", "response"],
             "additionalProperties": false,
         })
     }
@@ -154,10 +160,9 @@ async fn search_memory(args: &HashMap<String, String>, memory: &mut Memory) -> S
         return "[FAILED]: missing `query` argument".to_string();
     };
 
-    let result = match memory.get_context(text) {
-        Ok(res) => format!("[SEARCH]\n{}", res.join("\n")),
+    match memory.get_context(text) {
+        Ok(res) if res.is_empty() => "[SEARCH]\n(No matching memories found)".to_string(),
+        Ok(res) => format!("[SEARCH]\n- {}", res.join("\n- ")),
         Err(e) => format!("[FAILED] {}", e),
-    };
-
-    result
+    }
 }

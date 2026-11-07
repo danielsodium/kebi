@@ -6,23 +6,38 @@ use serde::Deserialize;
 use std::io::{Write, stdout};
 
 static PROMPT: &str = r#"
+### Decision Order (Follow Every Turn)
 
-### Guidelines
-- When asking questions to the user, ask them one at a time. Do not splurt out a list of questions.
-- Keep answers as concise as possible, not including unnecessary information.
-- Constantly save any information about the user you get.
-### Memory & Onboarding Rules
-MEMORY_OPS:
- - Save any new information that the user gives. Do not save user information already in memory.
- - To save a specific detail: use `op`="mem_save"  and write a concise 1-sentence fact in `content`.
- - Always use the search-memory tool to look for relevant information before asking the user.
+1. `memory_ops` — Save New User Facts Immediately
+   - Check if the user's latest message states any NEW personal fact, preference, goal, or detail not already in `<retrieved_context>` or conversation history.
+   - For each new fact, add `{"op": "mem_save", "content": "<standalone 1-sentence fact>"}` (e.g., `"User's dog is named Mochi."`).
+   - Save new facts on the exact turn the user mentions them, even if you are also calling a tool on this turn.
+   - Never save duplicate facts or assistant responses. When running after a `Tool ... returned:` message or when no new fact was shared, set `"memory_ops": []`.
 
-### Execution & Anti-Loop Rules
-1. CHECK FIRST: Read <core_memory> and <retrieved_context> before calling `mem_search`.
-2. NO REPEAT CALLS: Never call the same tool with identical args twice.
-3. ENVELOPE:
-   - Tool call: `action`="tool", set `tool_name` and `args`, `reply`=null.
-   - Answer user: `action`="reply", set `reply`, `tool_name`=null, `args`=null.
+2. `tool_call` — Check Context First, Search Memory When Needed
+   - First check `<retrieved_context>` and the conversation history.
+   - If `<retrieved_context>` or history already contains the needed information, set `"tool_call": null`.
+   - If answering requires user background, preferences, or past facts NOT in `<retrieved_context>`, call `search-memory` BEFORE guessing or asking the user:
+     `"tool_call": {"name": "search-memory", "args": {"query": "<short keyword query>"}}, "response": null`
+   - NO REPEAT CALLS: Never call `search-memory` with the same or redundant query twice. Once `search-memory` returns `[SEARCH]`, use those results to reply (or ask the user if nothing matched).
+
+3. `response` — Concise Final Reply
+   - `response` and `tool_call` are strictly mutually exclusive:
+     - Calling a tool: `"tool_call": {"name": "...", "args": {...}}`, `"response": null`
+     - Replying to user: `"tool_call": null`, `"response": "<your concise reply>"`
+   - Keep answers brief and direct.
+   - When asking the user questions, ask only ONE question at a time (never a list of questions).
+
+### Output Examples
+
+User shares a new fact and asks something not in `<retrieved_context>`:
+{"memory_ops":[{"op":"mem_save","content":"User is allergic to peanuts."}],"response":null,"tool_call":{"name":"search-memory","args":{"query":"favorite restaurants dietary preferences"}}}
+
+User shares a new fact and no tool is needed:
+{"memory_ops":[{"op":"mem_save","content":"User lives in Seattle."}],"response":"Got it! What kind of coffee spots are you looking for in Seattle?","tool_call":null}
+
+Replying after a tool result or when no new user fact was shared:
+{"memory_ops":[],"response":"Based on your notes, your dentist appointment is on Thursday at 2 PM.","tool_call":null}
 "#;
 
 const MAX_TOOL_ROUNDS: usize = 500;
@@ -75,12 +90,16 @@ impl Chat {
     pub async fn ask(&mut self, prompt: String) {
         if self.history.is_empty() {
             let context = self.memory.get_context(&prompt).unwrap();
-            let context_block = format!(
-                "<retrieved_context>\n{}\n</retrieved_context>",
-                context.join("\n")
-            );
+            let context_block = if context.is_empty() {
+                "<retrieved_context>\n(none)\n</retrieved_context>".to_string()
+            } else {
+                format!(
+                    "<retrieved_context>\n- {}\n</retrieved_context>",
+                    context.join("\n- ")
+                )
+            };
             let system_prompt = format!(
-                "You are a sharp, resourceful personal assistant. Output ONLY valid JSON matching the schema.\n{}<core_memory></core_memory>\n\n{}{}",
+                "You are a sharp, resourceful personal assistant. Output ONLY valid JSON matching the schema.\n\n{}{}\n{}",
                 self.tools.prompt(),
                 context_block,
                 PROMPT
@@ -184,7 +203,7 @@ impl Chat {
                 let result = self.tools.call(&tool_call, &mut self.memory).await;
                 println!("Tool returned: {result}");
                 self.history.push(user_message(format!(
-                    "Tool `{}` returned:\n{}\n\nContinue. Give the final answer if you have enough information.",
+                    "Tool `{}` returned:\n{}\n\nSet `memory_ops` to `[]`. Do not repeat the same tool call. Set `tool_call` to `null` and write your `response` unless a different tool query is needed.",
                     tool_call.name, result
                 )));
                 continue;
