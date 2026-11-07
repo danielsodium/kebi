@@ -1,9 +1,11 @@
+use crate::embedding::Embedder;
 use crate::llm_models::{LlmClient, Message, Request, Response, system_message, user_message};
 use crate::memory::{Memory, MemoryOp};
 use crate::tools::{ToolCall, ToolManager};
 
 use serde::Deserialize;
 use std::io::{Write, stdout};
+use std::sync::Arc;
 
 static PROMPT: &str = r#"
 ### Decision Order (Follow Every Turn)
@@ -66,9 +68,13 @@ pub struct Chat {
 }
 
 impl Chat {
-    pub fn new(url: String, model: String) -> Self {
+    pub fn new(url: String, model: String, embedder: &Arc<Embedder>) -> Self {
         let tools = ToolManager::new();
-        let memory = Memory::new("/home/hna/.local/share/kebi/memory.db".to_string()).unwrap();
+        let memory = Memory::new(
+            embedder,
+            "/home/hna/.local/share/kebi/memory.db".to_string(),
+        )
+        .unwrap();
 
         Chat {
             model,
@@ -107,7 +113,6 @@ impl Chat {
                 context_block,
                 PROMPT
             );
-            println!("[SYSTEM] {}", system_prompt);
             self.history.push(system_message(system_prompt));
         }
         self.history.push(user_message(prompt));
@@ -170,8 +175,6 @@ impl Chat {
                 return;
             }
 
-            println!("[RAW]: {}", answer_deltas.concat());
-
             let Some(Answer {
                 memory_ops,
                 response,
@@ -191,25 +194,15 @@ impl Chat {
                     self.memory
                         .insert(&mem.content)
                         .unwrap_or_else(|e| eprintln!("Failed to save to memory: {}", e));
-                    println!("[MEM SAVE] {}", &mem.content);
                 }
             }
 
             if let Some(tool_call) = tool_call {
-                if response.is_some() {
-                    eprintln!(
-                        "\nThe model returned both an answer and a tool call; using the tool call."
-                    );
-                }
-
-                println!("Calling {}...", tool_call.name);
                 let result = self.tools.call(&tool_call, &mut self.memory).await;
-                println!("Tool returned: {result}");
                 self.history.push(user_message(format!(
                     "Tool `{}` returned:\n{}\n\nSet `memory_ops` to `[]`. Do not repeat the same tool call. Set `tool_call` to `null` and write your `response` unless a different tool query is needed.",
                     tool_call.name, result
                 )));
-                continue;
             }
 
             if let Some(response) = response {

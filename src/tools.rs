@@ -41,9 +41,21 @@ impl ToolManager {
             }],
             lambda: Box::new(|args, memory| Box::pin(search_memory(args, memory))),
         };
+        let api_tool = Tool {
+            name: "list-apis".to_string(),
+            description: "List the API tools you have access to".to_string(),
+            args: vec![ToolArgSpec {
+                name: "query",
+                description: "Search query for tool to look for",
+            }],
+            lambda: Box::new(|args, memory| Box::pin(search_tools(args, memory))),
+        };
 
         ToolManager {
-            tools: BTreeMap::from([(search_tool.name.clone(), search_tool)]),
+            tools: BTreeMap::from([
+                (search_tool.name.clone(), search_tool),
+                (api_tool.name.clone(), api_tool),
+            ]),
         }
     }
 
@@ -153,6 +165,10 @@ impl ToolManager {
 
         (tool.lambda)(&call.args, memory).await
     }
+}
+
+async fn search_tools(_: &HashMap<String, String>, _: &mut Memory) -> String {
+    "[SEARCH] No tools found".to_string()
 }
 
 async fn search_memory(args: &HashMap<String, String>, memory: &mut Memory) -> String {
