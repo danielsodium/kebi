@@ -16,7 +16,7 @@ struct Tool {
     description: String,
     args: Vec<ToolArgSpec>,
     lambda: Box<
-        dyn for<'a> Fn(&'a HashMap<String, String>, &'a mut Memory) -> ToolFuture<'a> + Send + Sync,
+        dyn for<'a> Fn(&'a HashMap<String, String>, &'a Memory) -> ToolFuture<'a> + Send + Sync,
     >,
 }
 
@@ -154,7 +154,7 @@ impl ToolManager {
         })
     }
 
-    pub async fn call(&self, call: &ToolCall, memory: &mut Memory) -> String {
+    pub async fn call(&self, call: &ToolCall, memory: &Memory) -> String {
         let Some(tool) = self.tools.get(&call.name) else {
             return format!("[FAILED]: unknown tool `{}`", call.name);
         };
@@ -169,11 +169,11 @@ impl ToolManager {
     }
 }
 
-async fn search_tools(_: &HashMap<String, String>, _: &mut Memory) -> String {
+async fn search_tools(_: &HashMap<String, String>, _: &Memory) -> String {
     "[SEARCH] No tools found".to_string()
 }
 
-async fn search_memory(args: &HashMap<String, String>, memory: &mut Memory) -> String {
+async fn search_memory(args: &HashMap<String, String>, memory: &Memory) -> String {
     let Some(text) = args.get("query") else {
         return "[FAILED]: missing `query` argument".to_string();
     };

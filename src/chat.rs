@@ -1,10 +1,10 @@
-use crate::embedding::Embedder;
-use crate::llm_models::{LlmClient, Message, Request, Response, system_message, user_message};
-use crate::memory::{Memory, MemoryOp};
-use crate::tools::{ToolCall, ToolManager};
+use crate::llm_models::{Message, Request, Response, system_message, user_message};
+use crate::memory::MemoryOp;
+use crate::tools::ToolCall;
 
+use crate::agents::AgentContext;
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
-use std::io::{Write, stdout};
 use std::sync::Arc;
 
 static PROMPT: &str = r#"
@@ -59,46 +59,29 @@ struct Answer {
 }
 
 pub struct Chat {
-    model: String,
     history: Vec<Message>,
-    client: LlmClient,
-    max_tokens: Option<u32>,
-    tools: ToolManager,
-    memory: Memory,
+    ctx: Arc<AgentContext>,
 }
 
 impl Chat {
-    pub fn new(url: String, model: String, embedder: &Arc<Embedder>) -> Self {
-        let tools = ToolManager::new();
-        let memory = Memory::new(
-            embedder,
-            "/home/hna/.local/share/kebi/memory.db".to_string(),
-        )
-        .unwrap();
-
+    pub fn new(ctx: Arc<AgentContext>) -> Self {
         Chat {
-            model,
-            history: vec![],
-            client: LlmClient::new(url),
-            max_tokens: std::env::var("KEBI_MAX_TOKENS")
-                .ok()
-                .and_then(|value| value.parse().ok()),
-            tools,
-            memory,
+            history: Vec::new(),
+            ctx,
         }
     }
 
     fn request(&self) -> Request {
         Request {
-            model: self.model.clone(),
+            model: self.ctx.model.clone(),
             messages: self.history.clone(),
-            max_tokens: self.max_tokens,
+            max_tokens: self.ctx.max_tokens,
         }
     }
 
-    pub async fn ask(&mut self, prompt: String) {
+    pub async fn ask(&mut self, prompt: String) -> Result<String> {
         if self.history.is_empty() {
-            let context = self.memory.get_context(&prompt).await.unwrap();
+            let context = self.ctx.memory.get_context(&prompt).await.unwrap();
             let context_block = if context.is_empty() {
                 "<retrieved_context>\n(none)\n</retrieved_context>".to_string()
             } else {
@@ -109,24 +92,25 @@ impl Chat {
             };
             let system_prompt = format!(
                 "You are a sharp, resourceful personal assistant. Output ONLY valid JSON matching the schema.\n\n{}{}\n{}",
-                self.tools.prompt(),
+                self.ctx.tools.prompt(),
                 context_block,
                 PROMPT
             );
             self.history.push(system_message(system_prompt));
         }
         self.history.push(user_message(prompt));
-        self.run().await;
+        self.run().await
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self) -> Result<String> {
         for _ in 0..MAX_TOOL_ROUNDS {
             let mut reasoning_deltas: Vec<String> = Vec::new();
             let mut answer_deltas: Vec<String> = Vec::new();
 
             let outcome = match self
+                .ctx
                 .client
-                .stream::<Answer, _>(self.request(), self.tools.response_schema(), |event| {
+                .stream::<Answer, _>(self.request(), self.ctx.tools.response_schema(), |event| {
                     match event {
                         Response::ReasoningDelta { delta } => {
                             reasoning_deltas.push(delta);
@@ -140,37 +124,32 @@ impl Chat {
             {
                 Ok(outcome) => outcome,
                 Err(err) => {
-                    eprintln!("\nRequest failed: {err}");
-                    return;
+                    return Err(anyhow!("Request failed: {err}"));
                 }
             };
 
             self.history.push(outcome.message);
 
             if let Some(err) = &outcome.error {
-                eprintln!("\nStream interrupted: {err}");
-                return;
+                return Err(anyhow!("Stream interrupted: {err}"));
             }
 
             match outcome.finish_reason.as_deref() {
                 Some("length") => {
-                    eprintln!(
+                    return Err(anyhow!(
                         "\nResponse truncated: the model hit the token limit before finishing. Set KEBI_MAX_TOKENS to a larger value."
-                    );
-                    return;
+                    ));
                 }
                 Some(_) => {}
                 None => {
-                    eprintln!(
+                    return Err(anyhow!(
                         "\nStream ended before the model finished (connection closed early)."
-                    );
-                    return;
+                    ));
                 }
             }
 
             if let Some(err) = &outcome.parse_error {
-                eprintln!("\nFailed to parse structured output: {err}");
-                return;
+                return Err(anyhow!("\nFailed to parse structured output: {err}"));
             }
 
             let Some(Answer {
@@ -179,8 +158,7 @@ impl Chat {
                 tool_call,
             }) = outcome.parsed
             else {
-                eprintln!("\nThe model did not return a structured answer.");
-                return;
+                return Err(anyhow!("\nThe model did not return a structured answer."));
             };
 
             if !reasoning_deltas.is_empty() {
@@ -189,7 +167,8 @@ impl Chat {
 
             if !memory_ops.is_empty() {
                 for mem in memory_ops {
-                    self.memory
+                    self.ctx
+                        .memory
                         .insert(&mem.content)
                         .await
                         .unwrap_or_else(|e| eprintln!("Failed to save to memory: {}", e));
@@ -197,7 +176,7 @@ impl Chat {
             }
 
             if let Some(tool_call) = tool_call {
-                let result = self.tools.call(&tool_call, &mut self.memory).await;
+                let result = self.ctx.tools.call(&tool_call, &self.ctx.memory).await;
                 self.history.push(user_message(format!(
                     "Tool `{}` returned:\n{}\n\nSet `memory_ops` to `[]`. Do not repeat the same tool call. Set `tool_call` to `null` and write your `response` unless a different tool query is needed.",
                     tool_call.name, result
@@ -205,25 +184,16 @@ impl Chat {
             }
 
             if let Some(response) = response {
-                println!("{response}");
-                return;
+                return Ok(response);
             }
 
-            eprintln!("\nThe model returned neither an answer nor a tool call.");
-            return;
+            return Err(anyhow!(
+                "\nThe model returned neither an answer nor a tool call."
+            ));
         }
 
-        eprintln!("Stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer.");
+        Err(anyhow!(
+            "Stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer."
+        ))
     }
-}
-
-#[allow(dead_code)]
-fn print_delta(color: bool, deltas: &[String]) {
-    let delta = &deltas[deltas.len() - 1];
-    if color {
-        print!("\x1b[2m{delta}\x1b[0m");
-    } else {
-        print!("{delta}");
-    }
-    stdout().flush().unwrap()
 }

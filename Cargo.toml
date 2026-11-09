@@ -20,3 +20,4 @@ walkdir = "2.5.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
 sqlite-vec = "0.1"
 fastembed = "7.5.0"
+axum = "0.8.9"

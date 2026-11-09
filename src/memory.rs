@@ -4,6 +4,7 @@ use anyhow::Result;
 use rusqlite::{Connection, ffi::sqlite3_auto_extension, params};
 use serde::Deserialize;
 use sqlite_vec::sqlite3_vec_init;
+use tokio::sync::Mutex;
 
 use crate::embedding::Embedder;
 
@@ -17,7 +18,7 @@ pub struct MemoryOp {
 
 pub struct Memory {
     embedder: Arc<Embedder>,
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Memory {
@@ -44,27 +45,28 @@ impl Memory {
 
         Ok(Memory {
             embedder: embedder.clone(),
-            conn,
+            conn: Mutex::new(conn),
         })
     }
 
-    pub async fn insert(&mut self, msg: &String) -> Result<()> {
+    pub async fn insert(&self, msg: &String) -> Result<()> {
         let vector = self.embedder.embed(&msg).await?;
-        self.conn
-            .execute("INSERT INTO memories (text) VALUES (?)", params![msg])?;
-        let mem_id = self.conn.last_insert_rowid();
-        self.conn.execute(
+        let conn = self.conn.lock().await;
+        conn.execute("INSERT INTO memories (text) VALUES (?)", params![msg])?;
+        let mem_id = conn.last_insert_rowid();
+        conn.execute(
             "INSERT INTO memory_embeddings (mem_id, embedding) VALUES (?, ?)",
             params![mem_id, as_bytes(&vector)],
         )?;
         Ok(())
     }
 
-    pub async fn get_context(&mut self, query: &String) -> Result<Vec<String>> {
+    pub async fn get_context(&self, query: &String) -> Result<Vec<String>> {
         let search_vector = self.embedder.embed(query).await?;
+        let conn = self.conn.lock().await;
 
         // Query for the top 25 closest matches within the distance cutoff
-        let mut stmt = self.conn.prepare(
+        let mut stmt = conn.prepare(
             "WITH knn AS (
              SELECT mem_id, distance
              FROM memory_embeddings
@@ -88,9 +90,7 @@ impl Memory {
             mem_ids.push(id);
         }
 
-        let mut stmt = self
-            .conn
-            .prepare("SELECT text FROM memories WHERE id = ?")?;
+        let mut stmt = conn.prepare("SELECT text FROM memories WHERE id = ?")?;
         let mem_strings = mem_ids
             .iter()
             .map(|id| stmt.query_row(params![id], |row| row.get::<_, String>(0)))
