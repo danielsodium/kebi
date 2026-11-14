@@ -43,6 +43,15 @@ impl ToolManager {
             }],
             lambda: Box::new(|args, memory| Box::pin(search_memory(args, memory))),
         };
+        let list_mem_tool = Tool {
+            name: "list-memories".to_string(),
+            description: "List the most recent saved memories when a broad overview is needed or search-memory returns no matches".to_string(),
+            args: vec![ToolArgSpec {
+                name: "limit",
+                description: "Maximum number of memories to return (e.g. '20')",
+            }],
+            lambda: Box::new(|args, memory| Box::pin(list_memories(args, memory))),
+        };
         let api_tool = Tool {
             name: "list-apis".to_string(),
             description: "List the API tools you have access to".to_string(),
@@ -56,6 +65,7 @@ impl ToolManager {
         ToolManager {
             tools: BTreeMap::from([
                 (search_tool.name.clone(), search_tool),
+                (list_mem_tool.name.clone(), list_mem_tool),
                 (api_tool.name.clone(), api_tool),
             ]),
         }
@@ -122,21 +132,59 @@ impl ToolManager {
             "properties": {
                 "memory_ops": {
                     "type": "array",
-                    "description": "New facts about the user learned in the latest message. Empty array [] if none.",
+                    "description": "Memory operations to save new facts, update outdated facts by id, or delete obsolete facts. Empty array [] if none.",
                     "items": {
-                        "type": "object",
-                        "properties": {
-                            "op": {
-                                "type": "string",
-                                "enum": ["mem_save"]
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "type": "string",
+                                        "enum": ["mem_save"]
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Self-contained atomic sentence about the user with parenthetical domain keywords, e.g. 'User has a severe allergy to peanuts (dietary restriction, food).'"
+                                    }
+                                },
+                                "required": ["op", "content"],
+                                "additionalProperties": false
                             },
-                            "content": {
-                                "type": "string",
-                                "description": "Telegraphic '<topic>: <keywords>' note (3-7 words, no filler)."
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "type": "string",
+                                        "enum": ["mem_update"]
+                                    },
+                                    "id": {
+                                        "type": "integer",
+                                        "description": "Memory id from [id=N] to overwrite."
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Updated self-contained atomic sentence about the user with parenthetical domain keywords."
+                                    }
+                                },
+                                "required": ["op", "id", "content"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "op": {
+                                        "type": "string",
+                                        "enum": ["mem_delete"]
+                                    },
+                                    "id": {
+                                        "type": "integer",
+                                        "description": "Memory id from [id=N] to remove."
+                                    }
+                                },
+                                "required": ["op", "id"],
+                                "additionalProperties": false
                             }
-                        },
-                        "required": ["op", "content"],
-                        "additionalProperties": false
+                        ]
                     },
                     "default": []
                 },
@@ -180,7 +228,27 @@ async fn search_memory(args: &HashMap<String, String>, memory: &Memory) -> Strin
 
     match memory.get_context(text).await {
         Ok(res) if res.is_empty() => "[SEARCH]\n(No matching memories found)".to_string(),
-        Ok(res) => format!("[SEARCH]\n- {}", res.join("\n- ")),
+        Ok(res) => {
+            let formatted: Vec<String> = res.iter().map(|m| m.format()).collect();
+            format!("[SEARCH]\n- {}", formatted.join("\n- "))
+        }
+        Err(e) => format!("[FAILED] {}", e),
+    }
+}
+
+async fn list_memories(args: &HashMap<String, String>, memory: &Memory) -> String {
+    let limit = args
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+
+    match memory.list_recent(limit).await {
+        Ok(res) if res.is_empty() => "[MEMORIES]\n(No saved memories found)".to_string(),
+        Ok(res) => {
+            let formatted: Vec<String> = res.iter().map(|m| m.format()).collect();
+            format!("[MEMORIES]\n- {}", formatted.join("\n- "))
+        }
         Err(e) => format!("[FAILED] {}", e),
     }
 }

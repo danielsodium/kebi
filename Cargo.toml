@@ -12,7 +12,7 @@ mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
 mpsc = "0.3.0"
 reqwest = "0.13.5"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 tokio = {version = "1.54.1", features = [ "full" ]}
 tokio-util = "0.7.20"
 uuid = { version = "1.29.0", features = ["v4"] }

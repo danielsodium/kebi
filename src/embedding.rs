@@ -17,9 +17,17 @@ impl Embedder {
         })
     }
 
-    pub async fn embed(&self, text: &String) -> Result<Vec<f32>> {
+    pub async fn embed_document(&self, text: &str) -> Result<Vec<f32>> {
+        let formatted = format!("title: memory | text: {text}");
         let mut model = self.model.lock().await;
-        let mut embeddings = model.embed(vec![text], None)?;
+        let mut embeddings = model.embed(vec![formatted], None)?;
+        Ok(embeddings.remove(0))
+    }
+
+    pub async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        let formatted = format!("task: search result | query: {query}");
+        let mut model = self.model.lock().await;
+        let mut embeddings = model.embed(vec![formatted], None)?;
         Ok(embeddings.remove(0))
     }
 }
